@@ -1,8 +1,10 @@
 import os
 import uuid
-from fastapi import FastAPI, Request, Response, Cookie
+from fastapi import FastAPI, Request, Response, Cookie, Body
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import Table, Column, String, MetaData
+from databases import Database
 from pyngrok import ngrok
 import threading
 import uvicorn
@@ -12,32 +14,72 @@ import uvicorn
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Goes up from Backend/ to LearnWebsite/
 FRONTEND_DIR = os.path.join(BASE_DIR, "front-end")
 
+DATABASE_URL = "sqlite:///./users.db"
+
+metadata = MetaData()
+
+users = Table(
+    "users",
+    metadata,
+    Column("ip", String, primary_key=True),
+    Column("username", String, nullable=False),
+)
+
+database = Database(DATABASE_URL)
+
 
 
 app = FastAPI()
 app.mount("/front-end", StaticFiles(directory=FRONTEND_DIR), name="front-end")
-USER_ID_COOKIE = "user_id"
+ip_username_map = {}
+
+
+
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+    query = """
+    CREATE TABLE IF NOT EXISTS users (
+    ip TEXT PRIMARY KEY,
+    username TEXT NOT NULL);
+    """
+    await database.execute(query)
+
+
+@app.on_event("shutdown")
+async def shutdown():
+
+    await database.disconnect()
+
+
 
 
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request, response: Response, user_id: str | None = Cookie(default=None)):
-    # Assign user_id cookie if not present
-    if not user_id:
-        user_id = str(uuid.uuid4())
-        response.set_cookie(key=USER_ID_COOKIE, value=user_id, httponly=True)
     index_path = os.path.join(FRONTEND_DIR, "index.html")
     return FileResponse(index_path)
 
-@app.get("/user", response_class=JSONResponse)
-async def get_user(user_id: str | None = Cookie(default=None)):
-    if not user_id:
-        return JSONResponse({"error": "User ID cookie not found"}, status_code=404)
-    return {"user_id": user_id}
+@app.post("/register-user")
+async def register_user(request: Request, data: dict = Body(...)):
+    username = data.get("username")
+    client_ip = request.client.host
+
+    # Insert or update user in DB
+    query = users.insert().values(ip=client_ip, username=username)
+    # For SQLite UPSERT alternative:
+    query = f"""
+    INSERT INTO users (ip, username)
+    VALUES (:ip, :username)
+    ON CONFLICT(ip) DO UPDATE SET username=excluded.username;
+    """
+    await database.execute(query=query, values={"ip": client_ip, "username": username})
+
+    return JSONResponse({"message": f"User: {username}, registered with IP: {client_ip}"})
 
 
-@app.get("/card1", response_class=HTMLResponse)
+@app.get("/waitingroom", response_class=HTMLResponse)
 async def read_root(request: Request):
-    index_path = os.path.join(FRONTEND_DIR, "indexCard1.html")
+    index_path = os.path.join(FRONTEND_DIR, "waitingroom.html")
     return FileResponse(index_path)
 
 

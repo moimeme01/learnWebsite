@@ -1,5 +1,7 @@
 import os
 import uuid
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request, Response, Cookie, Body
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,28 +30,32 @@ users = Table(
 database = Database(DATABASE_URL)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # starting up
+    await database.connect()
+    query = """
+    CREATE TABLE IF NOT EXISTS users (
+    ip TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    gameCode INTEGER);
+    """
+    await database.execute(query)
 
-app = FastAPI()
+    yield
+
+    # shutting down
+    await database.disconnect()
+
+
+app = FastAPI(lifespan=lifespan)
 app.mount("/front-end", StaticFiles(directory=FRONTEND_DIR), name="front-end")
 ip_username_map = {}
 
 
 
-@app.on_event("startup")
-async def startup():
-    await database.connect()
-    query = """
-    CREATE TABLE IF NOT EXISTS users (
-    ip TEXT PRIMARY KEY,
-    username TEXT NOT NULL);
-    """
-    await database.execute(query)
 
 
-@app.on_event("shutdown")
-async def shutdown():
-
-    await database.disconnect()
 
 
 
@@ -64,15 +70,13 @@ async def register_user(request: Request, data: dict = Body(...)):
     username = data.get("username")
     client_ip = request.client.host
 
-    # Insert or update user in DB
-    query = users.insert().values(ip=client_ip, username=username)
     # For SQLite UPSERT alternative:
     query = f"""
-    INSERT INTO users (ip, username)
-    VALUES (:ip, :username)
+    INSERT INTO users (ip, username, gameCode)
+    VALUES (:ip, :username, None)
     ON CONFLICT(ip) DO UPDATE SET username=excluded.username;
     """
-    await database.execute(query=query, values={"ip": client_ip, "username": username})
+    await database.execute(query=query, values={"ip": client_ip, "username": username, "gameCode": 0})
 
     return JSONResponse({"message": f"User: {username}, registered with IP: {client_ip}"})
 
